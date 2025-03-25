@@ -1,34 +1,25 @@
-# detectors/eyebrow_detector.py
-
-from utils.calculations import calculate_distance_coords
+import numpy as np
 
 def calculate_ebr(eyebrow_landmarks, eye_landmarks, width, height):
-    """
-    Calculate Eyebrow Raise Ratio (EBR)
-
-    :param eyebrow_landmarks: List of eyebrow landmarks (left or right)
-    :param eye_landmarks: List of eye landmarks (left or right)
-    :param width: Width of the frame
-    :param height: Height of the frame
-    :return: Eyebrow raise ratio
-    """
-    # Select central points
-    eyebrow_point = eyebrow_landmarks[1]
-    eye_point = eye_landmarks[1]
-
-    # Convert landmarks to coordinates
-    eyebrow_coord = (int(eyebrow_point.x * width), int(eyebrow_point.y * height))
-    eye_coord = (int(eye_point.x * width), int(eye_point.y * height))
-
-    # Calculate vertical distance
-    vertical_distance = calculate_distance_coords(eyebrow_coord, eye_coord)
-
-    # Normalize by eye width
-    eye_width = calculate_distance_coords(
-        (int(eye_landmarks[0].x * width), int(eye_landmarks[0].y * height)),
-        (int(eye_landmarks[3].x * width), int(eye_landmarks[3].y * height))
+    """Calculates the Eyebrow Raise Ratio (EBR) to detect eyebrow movement."""
+    
+    # Get key points
+    brow_mid = eyebrow_landmarks[2]
+    eye_mid = eye_landmarks[2]
+    
+    # Vertical distance between eyebrow mid-point and eye mid-point
+    vertical_distance = np.linalg.norm(
+        np.array([brow_mid.x * width, brow_mid.y * height]) - 
+        np.array([eye_mid.x * width, eye_mid.y * height])
     )
+    
+    return vertical_distance
 
-    ebr = vertical_distance / eye_width if eye_width else 0
-
-    return ebr
+def detect_eyebrow_gesture(ebr, neutral_threshold=1.2, raised_threshold=1.6):
+    """Detects eyebrow gestures based on EBR values."""
+    if ebr > raised_threshold:
+        return "Raised"
+    elif ebr < neutral_threshold:
+        return "Lowered"
+    else:
+        return "Neutral"
