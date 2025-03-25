@@ -1,33 +1,56 @@
 import numpy as np
-import cv2
-import mediapipe as mp
+from collections import deque
+from utils.calculations import calculate_distance_coords
 
-def calculate_ear(eye_landmarks, width, height):
-    """Calculates the Eye Aspect Ratio (EAR) to detect blinks."""
-    p1, p2, p3, p4, p5, p6 = eye_landmarks
-    
-    vertical_1 = np.linalg.norm(np.array([p2.x * width, p2.y * height]) - np.array([p6.x * width, p6.y * height]))
-    vertical_2 = np.linalg.norm(np.array([p3.x * width, p3.y * height]) - np.array([p5.x * width, p5.y * height]))
-    horizontal = np.linalg.norm(np.array([p1.x * width, p1.y * height]) - np.array([p4.x * width, p4.y * height]))
-    
-    ear = (vertical_1 + vertical_2) / (2.0 * horizontal)
-    return ear
+class EyeDetector:
+    def __init__(self, ear_threshold=0.25, smoothing_frames=3):
+        """
+        Eye Detector class for calculating Eye Aspect Ratio (EAR) and detecting blinks.
 
-def estimate_gaze(face_landmarks, width, height):
-    """Estimates gaze direction based on eye landmarks."""
-    left_eye_center = np.array([(face_landmarks[33].x + face_landmarks[133].x) / 2 * width, 
-                                (face_landmarks[33].y + face_landmarks[133].y) / 2 * height])
-    right_eye_center = np.array([(face_landmarks[362].x + face_landmarks[263].x) / 2 * width, 
-                                 (face_landmarks[362].y + face_landmarks[263].y) / 2 * height])
-    
-    nose_tip = np.array([face_landmarks[1].x * width, face_landmarks[1].y * height])
-    
-    gaze_vector = (left_eye_center + right_eye_center) / 2 - nose_tip
-    gaze_direction = "Center"
-    
-    if gaze_vector[0] < -5:
-        gaze_direction = "Left"
-    elif gaze_vector[0] > 5:
-        gaze_direction = "Right"
-    
-    return gaze_direction
+        :param ear_threshold: Threshold for blink detection (default 0.25).
+        :param smoothing_frames: Number of frames for EAR smoothing.
+        """
+        self.ear_threshold = ear_threshold
+        self.ear_history = deque(maxlen=smoothing_frames)  # Efficient rolling window
+
+    def calculate_ear(self, eye_landmarks, width, height):
+        """
+        Calculate Eye Aspect Ratio (EAR) for blink detection.
+
+        :param eye_landmarks: List of eye landmarks from Mediapipe or dlib.
+        :param width: Width of the frame.
+        :param height: Height of the frame.
+        :return: Smoothed Eye Aspect Ratio (EAR).
+        """
+        if len(eye_landmarks) != 6:
+            raise ValueError("Eye landmarks should contain exactly 6 points.")
+
+        # Convert landmarks to 2D coordinates
+        coords = [(int(pt.x * width), int(pt.y * height)) for pt in eye_landmarks]
+
+        # Calculate vertical distances
+        vertical1 = calculate_distance_coords(coords[1], coords[5])  # p2 - p6
+        vertical2 = calculate_distance_coords(coords[2], coords[4])  # p3 - p5
+
+        # Calculate horizontal eye distance
+        horizontal = calculate_distance_coords(coords[0], coords[3])  # p1 - p4
+
+        if horizontal == 0:
+            return 0  # Prevent division by zero
+
+        # Compute EAR
+        ear = (vertical1 + vertical2) / (2.0 * horizontal)
+
+        # Apply moving average smoothing
+        self.ear_history.append(ear)
+        return np.mean(self.ear_history)  # Smoothed EAR
+
+    def is_blinking(self, ear, threshold=None):
+        """
+        Detects if the user is blinking based on EAR threshold.
+
+        :param ear: Eye Aspect Ratio.
+        :param threshold: Custom threshold (optional), defaults to instance EAR threshold.
+        :return: True if blink detected, else False.
+        """
+        return ear < (threshold if threshold is not None else self.ear_threshold)
