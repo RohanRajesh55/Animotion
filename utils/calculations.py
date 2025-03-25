@@ -1,5 +1,3 @@
-# utils/calculations.py
-
 import numpy as np
 import time
 
@@ -57,3 +55,16 @@ class FPSCounter:
         Returns the smoothed average FPS value.
         """
         return self.get_fps()
+
+
+def fps_calculation(frame_count, start_time):
+    """
+    Calculates FPS based on frame count and time elapsed.
+
+    :param frame_count: Current frame count
+    :param start_time: Time when video started
+    :return: Frame count and FPS value
+    """
+    elapsed_time = time.time() - start_time
+    fps = frame_count / elapsed_time if elapsed_time > 0 else 0
+    return frame_count, fps

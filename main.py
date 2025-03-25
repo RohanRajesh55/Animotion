@@ -35,17 +35,14 @@ except ValueError:
 
 # Initialize MediaPipe Face Mesh
 mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=2, refine_landmarks=True,
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, refine_landmarks=True,
                                   min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
-# Initialize webcam
+# Start webcam feed
 cap = cv2.VideoCapture(DROIDCAM_URL)
 if not cap.isOpened():
     logger.error(f"Cannot open camera '{DROIDCAM_URL}'")
     exit(1)
-
-# Initialize EyeDetector
-eye_detector = EyeDetector()
 
 # FPS Calculation
 frame_count = 0
@@ -89,17 +86,16 @@ def process_frames():
         if results.multi_face_landmarks:
             for face_landmarks in results.multi_face_landmarks:
                 try:
-                    # Ensure landmarks exist before calculations
-                    left_eye_landmarks = [face_landmarks.landmark[i] for i in [33, 160, 158, 133, 153, 144]]
-                    right_eye_landmarks = [face_landmarks.landmark[i] for i in [362, 385, 387, 263, 373, 380]]
+                    # Eye Aspect Ratio (EAR)
+                    eye_landmarks = [face_landmarks.landmark[i] for i in [33, 160, 158, 133, 153, 144, 362, 385, 387, 263, 373, 380]]
                     mouth_landmarks = [face_landmarks.landmark[i] for i in [61, 291, 13, 14]]
 
-                    if len(left_eye_landmarks) < 6 or len(right_eye_landmarks) < 6 or len(mouth_landmarks) < 4:
+                    if len(eye_landmarks) < 12 or len(mouth_landmarks) < 4:
                         continue  # Skip frame if landmarks are incomplete
 
                     # Eye Aspect Ratio (EAR)
-                    ear_left = eye_detector.calculate_ear(left_eye_landmarks, width, height)
-                    ear_right = eye_detector.calculate_ear(right_eye_landmarks, width, height)
+                    ear_left = EyeDetector.calculate_ear(eye_landmarks[:6], width, height)
+                    ear_right = EyeDetector.calculate_ear(eye_landmarks[6:], width, height)
                     avg_ear = (ear_left + ear_right) / 2
 
                     # Mouth Aspect Ratio (MAR)
@@ -151,14 +147,11 @@ def process_frames():
     logger.info("Program terminated.")
 
 if __name__ == "__main__":
-    try:
-        process_frames()
-    finally:
-        logger.info("Shutting down WebSocket...")
-        shared_vars.stop_websocket()
-        if data_lock.locked():
-            data_lock.release()
-        websocket_thread.join()
-        logger.info("Websocket thread terminated.")
-        time.sleep(1)  # Allow last messages to be sent before exiting
-        exit(0)
+    process_frames()
+    logger.info("Program terminated.")
+    shared_vars.stop_websocket()
+    data_lock.release()
+    websocket_thread.join()
+    logger.info("Websocket thread terminated.")
+    time.sleep(1)  # Allow last messages to be sent before exiting
+    exit(0)
