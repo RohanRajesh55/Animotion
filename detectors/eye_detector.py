@@ -1,4 +1,3 @@
-# detector/eye_detector.py
 from typing import List, Tuple, Any
 from utils.calculations import calculate_distance_coords
 
