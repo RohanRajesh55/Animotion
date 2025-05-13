@@ -1,0 +1,27 @@
+project/
+├── config.ini                     # Application configuration (thresholds, camera URL, model paths, etc.)
+├── README.md                      # Project overview and documentation
+├── requirements.txt               # List of required Python packages
+├── main_integration.py            # Core integration pipeline (video capture, detectors, data fusion)
+├── main_ui.py                     # Production‑grade UI/dashboard (e.g., with PyQt5)
+├── avatar_integration.py          # Module to send integrated outputs to the avatar engine via WebSocket
+├── calibration_dialog.py          # In‑app calibration module for adjusting thresholds in real time
+├── data_logger.py                 # Persistent logging module (stores detector outputs in SQLite)
+├── detectors/                     # All detector modules
+│   ├── __init__.py
+│   ├── eye_detector.py            # Eye detection module (EAR calculation and blink detection)
+│   ├── mouth_detector.py          # Mouth detection module (MAR calculation and mouth open detection)
+│   ├── eyebrow_detector.py        # Eyebrow detection module (Eyebrow Raise Ratio with temporal smoothing)
+│   ├── head_pose_detector.py      # Head pose estimation using 2D–3D coordinate mapping
+│   └── advanced_lip_sync_detector.py  # Advanced lip sync detection with production‑grade model integration
+├── models/                        # Model architectures and pretrained model files
+│   ├── __init__.py
+│   ├── wav2lip.py                 # Production‑grade Wav2Lip network (encoder, audio & visual fusion, decoder)
+│   └── Wav2Lip-SD-NOGAN.pt         # Pretrained checkpoint file for the Wav2Lip model
+├── filter/                        # Filtering modules to improve stability and tracking
+│   ├── __init__.py
+│   └── Kalman_filter.py           # Production‑grade Kalman filter implementation for smoothing data
+└── utils/                         # Utility functions and shared variables
+    ├── __init__.py
+    ├── calculations.py            # Common calculations (e.g., Euclidean distance, other metrics)
+    └── shared_variables.py        # Shared variables for multi‑thread synchronization and communication

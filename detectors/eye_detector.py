@@ -1,27 +1,52 @@
-# detectors/eye_detector.py
-
+import logging
+from typing import List, Any, Tuple
+import numpy as np
 from utils.calculations import calculate_distance_coords
 
-def calculate_ear(eye_landmarks, width, height):
+logger = logging.getLogger(__name__)
+
+def calculate_ear(eye_landmarks: List[Any], width: int, height: int) -> float:
     """
-    Calculate Eye Aspect Ratio (EAR)
+    Calculate the Eye Aspect Ratio (EAR) from eye landmarks.
 
-    :param eye_landmarks: List of eye landmarks
-    :param width: Width of the frame
-    :param height: Height of the frame
-    :return: Eye aspect ratio
+    EAR = (||p2 - p6|| + ||p3 - p5||) / (2 * ||p1 - p4||)
+
+    Args:
+        eye_landmarks (List[Any]): List of 6+ points with normalized x/y attributes (float [0,1]).
+        width (int): Frame width in pixels.
+        height (int): Frame height in pixels.
+
+    Returns:
+        float: EAR value (0.0 to ~0.4 typically). 0.0 if invalid input or calculation fails.
     """
-    # Convert landmarks to 2D coordinates
-    coords = [(int(point.x * width), int(point.y * height)) for point in eye_landmarks]
+    if not eye_landmarks or len(eye_landmarks) < 6:
+        logger.error("Insufficient landmarks provided for EAR calculation. Expected at least 6, got %d.",
+                     len(eye_landmarks) if eye_landmarks else 0)
+        return 0.0
 
-    # Calculate distances between the vertical eye landmarks
-    vertical1 = calculate_distance_coords(coords[1], coords[5])
-    vertical2 = calculate_distance_coords(coords[2], coords[4])
+    try:
+        coords = []
+        for i, point in enumerate(eye_landmarks[:6]):
+            if not hasattr(point, 'x') or not hasattr(point, 'y'):
+                logger.error("Landmark %d missing 'x' or 'y' attribute.", i)
+                return 0.0
+            coords.append((int(point.x * width), int(point.y * height)))
 
-    # Calculate distance between the horizontal eye landmarks
-    horizontal = calculate_distance_coords(coords[0], coords[3])
+        # Convert to NumPy for vectorized distance calculation
+        coords = np.array(coords)
 
-    # Calculate EAR
-    ear = (vertical1 + vertical2) / (2.0 * horizontal) if horizontal else 0
+        # EAR formula components
+        vertical1 = np.linalg.norm(coords[1] - coords[5])
+        vertical2 = np.linalg.norm(coords[2] - coords[4])
+        horizontal = np.linalg.norm(coords[0] - coords[3])
 
-    return ear
+        if horizontal < 1e-5:
+            logger.warning("Horizontal distance is too small or zero. Returning EAR=0.")
+            return 0.0
+
+        ear = (vertical1 + vertical2) / (2.0 * horizontal)
+        return round(float(ear), 5)
+
+    except Exception as e:
+        logger.exception("Error computing EAR: %s", e)
+        return 0.0

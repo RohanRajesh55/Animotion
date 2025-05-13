@@ -1,30 +1,76 @@
-# detectors/lip_sync.py
+"""
+lip sync value.
 
+Lip sync value is computed as the ratio of vertical mouth opening to horizontal mouth width,
+based on key mouth landmarks. The output is normalized to [0.0, 1.0].
+"""
+
+import logging
+from typing import List, Any, Tuple
 from utils.calculations import calculate_distance_coords
 
-def calculate_lip_sync_value(mouth_landmarks, width, height):
+logger = logging.getLogger(__name__)
+
+# Constants for mouth landmark indexing
+UPPER_INNER_LIP = 0
+LOWER_INNER_LIP = 1
+LEFT_CORNER = 2
+RIGHT_CORNER = 3
+
+def clamp(value: float, min_value: float = 0.0, max_value: float = 1.0) -> float:
+    """Clamp a value to a specified range."""
+    return max(min(value, max_value), min_value)
+
+def calculate_lip_sync_value(
+    mouth_landmarks: List[Any],
+    width: int,
+    height: int,
+    openness_range: Tuple[float, float] = (0.0, 1.0)
+) -> float:
     """
-    Calculate Lip Sync Value based on mouth openness and shape
+    Calculate Lip Sync Value from mouth landmarks.
 
-    :param mouth_landmarks: List of mouth landmarks
-    :param width: Width of the frame
-    :param height: Height of the frame
-    :return: Lip sync value between 0.0 and 1.0
+    Parameters:
+        mouth_landmarks (List[Any]): List of normalized mouth landmarks with at least 4 key points.
+        width (int): Width of the image/frame.
+        height (int): Height of the image/frame.
+        openness_range (Tuple[float, float]): Optional min-max range to normalize openness.
+
+    Returns:
+        float: Normalized lip sync value in the range [0.0, 1.0]. Returns 0.0 on error.
     """
-    # Convert landmarks to coordinates
-    upper_inner_lip = (int(mouth_landmarks[0].x * width), int(mouth_landmarks[0].y * height))
-    lower_inner_lip = (int(mouth_landmarks[1].x * width), int(mouth_landmarks[1].y * height))
-    left_corner = (int(mouth_landmarks[2].x * width), int(mouth_landmarks[2].y * height))
-    right_corner = (int(mouth_landmarks[3].x * width), int(mouth_landmarks[3].y * height))
+    if not mouth_landmarks or len(mouth_landmarks) < 4:
+        logger.error("Insufficient mouth landmarks; expected 4, got %d.",
+                     len(mouth_landmarks) if mouth_landmarks else 0)
+        return 0.0
 
-    # Vertical and horizontal distances
-    vertical_distance = calculate_distance_coords(upper_inner_lip, lower_inner_lip)
-    horizontal_distance = calculate_distance_coords(left_corner, right_corner)
+    try:
+        # Convert normalized coordinates to image-space.
+        upper = (int(mouth_landmarks[UPPER_INNER_LIP].x * width),
+                 int(mouth_landmarks[UPPER_INNER_LIP].y * height))
+        lower = (int(mouth_landmarks[LOWER_INNER_LIP].x * width),
+                 int(mouth_landmarks[LOWER_INNER_LIP].y * height))
+        left = (int(mouth_landmarks[LEFT_CORNER].x * width),
+                int(mouth_landmarks[LEFT_CORNER].y * height))
+        right = (int(mouth_landmarks[RIGHT_CORNER].x * width),
+                 int(mouth_landmarks[RIGHT_CORNER].y * height))
 
-    # Calculate mouth openness ratio
-    mouth_openness = vertical_distance / horizontal_distance if horizontal_distance else 0
+        vertical_dist = calculate_distance_coords(upper, lower)
+        horizontal_dist = calculate_distance_coords(left, right)
 
-    # Map the value to a range suitable for your application (e.g., 0.0 to 1.0)
-    lip_sync_value = min(max(mouth_openness, 0.0), 1.0)
+        if horizontal_dist == 0:
+            logger.warning("Horizontal mouth width is zero; cannot compute lip sync value.")
+            return 0.0
 
-    return lip_sync_value
+        raw_openness = vertical_dist / horizontal_dist
+
+        # Normalize and clamp the result
+        min_openness, max_openness = openness_range
+        normalized = (raw_openness - min_openness) / (max_openness - min_openness)
+        lip_sync_value = clamp(normalized)
+
+        return lip_sync_value
+
+    except Exception as e:
+        logger.exception("Exception while calculating lip sync value: %s", e)
+        return 0.0

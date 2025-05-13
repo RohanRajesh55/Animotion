@@ -1,5 +1,3 @@
-# websocket_client.py
-
 import asyncio
 import websockets
 import json
@@ -20,14 +18,16 @@ logger = logging.getLogger(__name__)
 
 async def websocket_task(shared_vars, data_lock):
     """
-    Asynchronous task to handle WebSocket communication.
+    Asynchronous task to maintain a persistent WebSocket connection and send expression data.
+    Implements robust error handling and exponential backoff for reconnection attempts.
     """
+    reconnect_delay = 3  # seconds; initial delay before retrying
     while True:
         try:
             async with websockets.connect(VTS_WS_URL) as websocket:
                 logger.info("Connected to VTube Studio WebSocket.")
 
-                # Authenticate
+                # Send the authentication message
                 auth_message = {
                     "apiName": "VTubeStudioPublicAPI",
                     "apiVersion": "1.0",
@@ -43,12 +43,24 @@ async def websocket_task(shared_vars, data_lock):
                 response = await websocket.recv()
                 logger.info(f"Authentication Response: {response}")
 
+                # Reset the reconnect delay upon successful connection
+                reconnect_delay = 3
+
+                # Main loop to send expression data at regular intervals
                 while True:
                     with data_lock:
-                        if None not in (shared_vars.ear_left, shared_vars.ear_right, shared_vars.mar,
-                                        shared_vars.ebr_left, shared_vars.ebr_right, shared_vars.lip_sync_value,
-                                        shared_vars.yaw, shared_vars.pitch, shared_vars.roll):
-                            # Prepare expression data
+                        # Ensure all required shared variables have been set
+                        if None not in (
+                            shared_vars.ear_left, 
+                            shared_vars.ear_right, 
+                            shared_vars.mar,
+                            shared_vars.ebr_left, 
+                            shared_vars.ebr_right, 
+                            shared_vars.lip_sync_value,
+                            shared_vars.yaw, 
+                            shared_vars.pitch, 
+                            shared_vars.roll
+                        ):
                             expression_data = {
                                 "apiName": "VTubeStudioPublicAPI",
                                 "apiVersion": "1.0",
@@ -68,15 +80,19 @@ async def websocket_task(shared_vars, data_lock):
                                     ]
                                 }
                             }
-                            # Send expression data
                             await websocket.send(json.dumps(expression_data))
+                    # Sleep briefly to control the sending rate (roughly 20 messages per second)
                     await asyncio.sleep(0.05)
+
         except Exception as e:
-            logger.error(f"WebSocket connection error: {e}. Reconnecting in 3 seconds...")
-            await asyncio.sleep(3)
+            logger.error(f"WebSocket connection error: {e}. Reconnecting in {reconnect_delay} seconds...")
+            await asyncio.sleep(reconnect_delay)
+            # Exponential backoff: increase the delay up to a maximum cap
+            reconnect_delay = min(reconnect_delay * 2, 30)
 
 def start_websocket(shared_vars, data_lock):
     """
-    Starts the asynchronous websocket task.
+    Entry point to start the asynchronous WebSocket task.
+    This function is to be called from another thread.
     """
     asyncio.run(websocket_task(shared_vars, data_lock))
