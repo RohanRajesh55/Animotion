@@ -1,13 +1,21 @@
-# utils/shared_variables.py
+from dataclasses import dataclass, field
+from typing import Optional
 
+@dataclass
 class SharedVariables:
-    def __init__(self):
-        self.ear_left = None
-        self.ear_right = None
-        self.mar = None
-        self.ebr_left = None
-        self.ebr_right = None
-        self.lip_sync_value = None
-        self.yaw = None
-        self.pitch = None
-        self.roll = None
+    ear_left: Optional[float] = None
+    ear_right: Optional[float] = None
+    mar: Optional[float] = None
+    ebr_left: Optional[float] = None
+    ebr_right: Optional[float] = None
+    lip_sync_value: Optional[float] = None
+    yaw: Optional[float] = None
+    pitch: Optional[float] = None
+    roll: Optional[float] = None
+
+    def reset(self) -> None:
+        """
+        Reset all metrics to None.
+        """
+        for field_name in self.__dataclass_fields__:
+            setattr(self, field_name, None)
