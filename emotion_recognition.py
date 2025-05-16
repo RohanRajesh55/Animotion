@@ -1,53 +1,38 @@
+import cv2
 import logging
+import numpy as np
+from deepface import DeepFace
 
-# Check for GPU availability using TensorFlow.
-try:
-    import tensorflow as tf
-    gpu_devices = tf.config.list_physical_devices('GPU')
-    if gpu_devices:
-        logging.info("GPU(s) detected: " + ", ".join([device.name for device in gpu_devices]))
-    else:
-        logging.info("No GPU detected. Running emotion analysis on CPU.")
-except ImportError:
-    logging.warning("TensorFlow not installed. Cannot check GPU availability; proceeding with default settings.")
+logger = logging.getLogger(__name__)
 
-# Attempt to import DeepFace for emotion recognition.
-try:
-    from deepface import DeepFace
-    DEEPFACE_AVAILABLE = True
-except ImportError:
-    logging.warning("DeepFace is not installed. Emotion recognition will default to 'Neutral'.")
-    DEEPFACE_AVAILABLE = False
-
-def analyze_emotion(face_roi, use_emotion_recognition=True, detector_backend='opencv'):
+def recognize_emotion(frame: np.ndarray) -> str:
     """
-    Analyze the emotion from the provided face region of interest (ROI) using DeepFace.
-    If a GPU is detected (with the GPU-enabled TensorFlow installed), DeepFace will run on the GPU;
-    otherwise, the analysis will run on the CPU.
+    Recognize the dominant emotion in the provided image frame.
+
+    This function converts the given BGR-format image (as received from OpenCV)
+    to RGB and runs DeepFace's emotion analysis. It returns the most likely emotion
+    (e.g., "happy", "sad", "neutral", etc.). In case of errors or if detection fails,
+    it returns "unknown".
 
     Args:
-        face_roi (numpy.ndarray): The image region containing the face.
-        use_emotion_recognition (bool): Whether to enable emotion recognition.
-        detector_backend (str): The backend detector to use with DeepFace.
+        frame (np.ndarray): The input image in BGR format.
 
     Returns:
-        str: Dominant emotion as detected by DeepFace or 'Neutral' if detection is disabled or fails.
+        str: The dominant emotion determined by the analysis, or "unknown" if analysis fails.
     """
-    if use_emotion_recognition and DEEPFACE_AVAILABLE:
-        try:
-            result = DeepFace.analyze(
-                face_roi,
-                actions=['emotion'],
-                enforce_detection=False,
-                detector_backend=detector_backend
-            )
-            # DeepFace might return a list if multiple faces are analyzed;
-            # in that case, just use the first result.
-            if isinstance(result, list):
-                result = result[0]
-            return result.get("dominant_emotion", "Neutral")
-        except Exception as e:
-            logging.error(f"Emotion analysis error: {e}")
-            return "Neutral"
-    else:
-        return "Neutral"
+    try:
+        # Convert the frame from BGR to RGB.
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Perform emotion analysis using DeepFace.
+        analysis = DeepFace.analyze(rgb_frame, actions=['emotion'], enforce_detection=False)
+        
+        # Check if analysis is a list; if so, use the first element.
+        if isinstance(analysis, list):
+            analysis = analysis[0]
+        
+        # Extract and return the dominant emotion.
+        emotion = analysis.get("dominant_emotion", "unknown")
+        return emotion
+    except Exception as e:
+        logger.exception("Failed to recognize emotion.", exc_info=e)
+        return "unknown"

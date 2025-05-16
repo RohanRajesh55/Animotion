@@ -1,5 +1,8 @@
+import logging
 from typing import List, Tuple, Any
 from utils.calculations import calculate_distance_coords
+
+logger = logging.getLogger(__name__)
 
 def calculate_ear(eye_landmarks: List[Any], width: int, height: int) -> float:
     """
@@ -22,10 +25,17 @@ def calculate_ear(eye_landmarks: List[Any], width: int, height: int) -> float:
     if len(eye_landmarks) != 6:
         raise ValueError(f"Expected exactly 6 eye landmarks, but got {len(eye_landmarks)}")
 
-    # Convert each normalized landmark to pixel coordinates.
-    coords: List[Tuple[int, int]] = [
-        (int(point.x * width), int(point.y * height)) for point in eye_landmarks
-    ]
+    try:
+        # Convert each normalized landmark to pixel coordinates.
+        coords: List[Tuple[int, int]] = [
+            (int(point.x * width), int(point.y * height)) for point in eye_landmarks
+        ]
+    except AttributeError as e:
+        logger.error(
+            "Invalid landmark format. Each landmark must have 'x' and 'y' attributes.",
+            exc_info=e
+        )
+        raise
 
     # Calculate vertical distances between the landmarks.
     vertical1 = calculate_distance_coords(coords[1], coords[5])
@@ -36,6 +46,7 @@ def calculate_ear(eye_landmarks: List[Any], width: int, height: int) -> float:
 
     # Prevent division by zero in case of an unexpected scenario.
     if horizontal == 0:
+        logger.warning("Horizontal distance is zero; returning EAR as 0.0")
         return 0.0
 
     ear = (vertical1 + vertical2) / (2.0 * horizontal)

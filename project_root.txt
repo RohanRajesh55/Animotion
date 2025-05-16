@@ -1,0 +1,29 @@
+project_root/
+├── .gitignore                         # Git ignore file for excluding build artifacts, virtual envs, etc.
+├── README.md                          # Main project documentation: overview, installation, usage, etc.
+├── project_root.txt                   # (Optional) Human-readable summary of the project structure
+├── requirements.txt                   # List of pinned dependencies for reproducible environments
+├── config.ini                         # Configuration file storing user settings (e.g., thresholds, API keys)
+├── calibration.py                     # Tool for camera calibration and computing EAR/MAR thresholds
+├── emotion_recognition.py             # DeepFace‑based emotion recognition module (with GPU support if available)
+├── emotion_integration.py             # Module for integrating emotion data into the processing pipeline
+├── performance_monitor.py             # Monitors runtime performance (FPS, resource usage, etc.)
+├── main.py                            # Main application: orchestrates video processing and landmark detection
+├── websocket_client.py                # Module for sending facial tracking data via WebSocket to an external API
+├── detectors/                         # Package for facial feature detection modules
+│   ├── __init__.py                    # Marks the detectors folder as a package
+│   ├── eye_detector.py                # Computes the Eye Aspect Ratio (EAR) for blink detection
+│   ├── eyebrow_detector.py            # Computes the Eyebrow Raise Ratio (EBR) for eyebrow movement detection
+│   ├── head_pose_estimator.py         # Estimates head pose (yaw, pitch, roll) via methods like solvePnP
+│   ├── lip_sync.py                   # Calculates lip-sync values based on mouth landmark analysis
+│   ├── mouth_detector.py              # Computes the Mouth Aspect Ratio (MAR) for evaluating mouth openness
+│   └── smile_detector.py              # Detects smiling by analyzing facial landmarks and cues
+├── filter/                            # Package for filtering and smoothing signals
+│   ├── __init__.py                    # Marks the filter folder as a package
+│   └── kalman_filter.py               # Implements a 1D Kalman Filter for smoothing noisy signals
+└── utils/                             # Utility modules and shared resources
+    ├── __init__.py                    # Marks the utils folder as a package
+    ├── calculations.py                # Provides helper functions (e.g., distance calculations, FPS estimation)
+    ├── config_manager.py              # Manages configuration files (parsing, updating config.ini values)
+    ├── shared_variables.py            # Container for inter-module data exchange (shared variables)
+    └── vtube_mapper.py                # Handles mapping of virtual tube (or avatar) settings as needed

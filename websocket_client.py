@@ -1,22 +1,51 @@
 import asyncio
-import websockets
+import json
 import logging
 import configparser
-import json
+import websockets
+import os
+from typing import Any
 
-PLUGIN_NAME = "trial"
-PLUGIN_DEV = "bons"
-TOKEN_FILE = "vts_token.txt"  # Save token for reuse
+from utils.shared_variables import SharedVariables
+from utils.vtube_mapper import map_metrics_to_vts_params
 
-async def authenticate(websocket):
-    # Load or request new token
-    token = None
-    try:
-        with open(TOKEN_FILE, "r") as f:
-            token = f.read().strip()
-    except FileNotFoundError:
-        # Request a new token
-        request = {
+# Configuration for our plugin.
+PLUGIN_NAME: str = "trial"
+PLUGIN_DEV: str = "bons"
+TOKEN_FILE: str = "vts_token.txt"  # Token cache file
+
+# Setup logging configuration.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+async def authenticate(websocket: websockets.WebSocketClientProtocol) -> str:
+    """
+    Retrieve and cache an authentication token from VTube Studio, then use it to authenticate.
+
+    Args:
+        websocket: The active WebSocket connection.
+
+    Returns:
+        The authentication token as a string.
+
+    Raises:
+        Exception: If authentication fails.
+    """
+    token: str = ""
+
+    # Attempt to load token from file.
+    if os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, "r") as f:
+                token = f.read().strip()
+            if not token:
+                logger.warning("Token file is empty; a new token will be requested.")
+        except Exception as e:
+            logger.error(f"Error reading token file: {e}")
+
+    # Request a new token if unavailable.
+    if not token:
+        request_payload = {
             "apiName": "VTubeStudioPublicAPI",
             "apiVersion": "1.0",
             "requestID": "getToken",
@@ -26,19 +55,28 @@ async def authenticate(websocket):
                 "pluginDeveloper": PLUGIN_DEV
             }
         }
-        await websocket.send(json.dumps(request))
-        response = json.loads(await websocket.recv())
-        token = response["data"]["authenticationToken"]
-        requires_verification = response["data"]["requiresVerification"]
+        logger.info("Requesting new authentication token from VTube Studio...")
+        await websocket.send(json.dumps(request_payload))
+        response_str = await websocket.recv()
+        try:
+            response = json.loads(response_str)
+            token = response["data"]["authenticationToken"]
+            requires_verification = response["data"].get("requiresVerification", False)
+        except Exception as e:
+            raise Exception(f"Failed to parse token response: {e}") from e
 
         if requires_verification:
-            print("Please approve the plugin in VTube Studio.")
-            await asyncio.sleep(5)  # Give user time to approve
+            logger.info("Token requested; waiting for user approval in VTube Studio...")
+            await asyncio.sleep(5)
 
-        with open(TOKEN_FILE, "w") as f:
-            f.write(token)
+        try:
+            with open(TOKEN_FILE, "w") as f:
+                f.write(token)
+            logger.info("New authentication token saved.")
+        except Exception as e:
+            logger.error(f"Error writing token file: {e}")
 
-    # Authenticate using the token
+    # Authenticate using the token.
     auth_request = {
         "apiName": "VTubeStudioPublicAPI",
         "apiVersion": "1.0",
@@ -50,32 +88,39 @@ async def authenticate(websocket):
             "authenticationToken": token
         }
     }
-
+    logger.info("Sending authentication request with token...")
     await websocket.send(json.dumps(auth_request))
-    response = json.loads(await websocket.recv())
-    if response.get("messageType") != "AuthenticationResponse" or not response["data"]["authenticated"]:
-        raise Exception("Authentication failed. Try deleting vts_token.txt and retrying.")
+    auth_response_str = await websocket.recv()
+    try:
+        auth_response = json.loads(auth_response_str)
+    except Exception as e:
+        raise Exception(f"Failed to parse authentication response: {e}") from e
 
-    logging.info("Authenticated with VTube Studio API.")
+    if auth_response.get("messageType") != "AuthenticationResponse" or not auth_response["data"].get("authenticated", False):
+        raise Exception("Authentication failed. Delete the token file and retry.")
+    
+    logger.info("Successfully authenticated with VTube Studio API.")
+    return token
 
-async def websocket_handler(shared_vars, data_lock, uri):
+async def websocket_handler(shared_vars: SharedVariables, uri: str) -> None:
+    """
+    Establish and maintain a WebSocket connection to VTube Studio, sending updated facial metrics
+    as VTube Studio parameters at approximately 30 FPS.
+
+    Args:
+        shared_vars: Shared variables object containing computed facial metrics.
+        uri: The VTube Studio WebSocket server URI.
+    """
     while True:
         try:
+            logger.info(f"Attempting connection to WebSocket server at {uri}...")
             async with websockets.connect(uri) as websocket:
-                logging.info(f"Connected to WebSocket server at {uri}")
-
-                # Authenticate
+                logger.info("Connected to VTube Studio WebSocket server.")
                 await authenticate(websocket)
-
-                # Main loop: send parameter values
+                
+                # Main loop: retrieve the latest metrics, map them, and send the payload.
                 while True:
-                    with data_lock:
-                        mouth_open = shared_vars.lip_sync_value  # Replace with any tracked expression
-
-                    # Clamp to [0,1] for VTube Studio
-                    mouth_open = max(0.0, min(1.0, float(mouth_open)))
-
-                    # Send parameter update
+                    params = map_metrics_to_vts_params(shared_vars)
                     payload = {
                         "apiName": "VTubeStudioPublicAPI",
                         "apiVersion": "1.0",
@@ -83,23 +128,35 @@ async def websocket_handler(shared_vars, data_lock, uri):
                         "messageType": "SetParameterValuesRequest",
                         "data": {
                             "parameterValues": [
-                                {
-                                    "id": "ParamMouthOpenY",
-                                    "value": mouth_open
-                                }
+                                {"id": key, "value": value} for key, value in params.items()
                             ]
                         }
                     }
-
+                    
                     await websocket.send(json.dumps(payload))
-                    await asyncio.sleep(1/30)  # 30 FPS update rate
-
+                    logger.info(f"Sent parameter update: {payload}")
+                    await asyncio.sleep(1 / 30)  # Maintain ~30 FPS update rate.
+                    
+        except asyncio.CancelledError:
+            logger.info("WebSocket handler task cancelled. Exiting...")
+            break
         except Exception as e:
-            logging.error(f"WebSocket connection error: {e}")
-            await asyncio.sleep(5)  # Retry after delay
+            logger.error(f"WebSocket connection error: {e}")
+            await asyncio.sleep(5)  # Wait before attempting to reconnect.
 
-def start_websocket(shared_vars, data_lock):
+def start_websocket_client(shared_vars: SharedVariables) -> None:
+    """
+    Reads configuration for the WebSocket URI and starts the WebSocket handler.
+
+    Args:
+        shared_vars: Shared variables to be updated with facial metrics.
+    """
     config = configparser.ConfigParser()
-    config.read('config.ini')
-    uri = config.get('WebSocket', 'VTS_WS_URL', fallback="ws://localhost:8001")
-    asyncio.run(websocket_handler(shared_vars, data_lock, uri))
+    config.read("config.ini")
+    uri = config.get("WebSocket", "VTS_WS_URL", fallback="ws://localhost:8001")
+    asyncio.run(websocket_handler(shared_vars, uri))
+
+if __name__ == '__main__':
+    # Instantiate the shared variables container (populated by other modules in production).
+    shared_vars = SharedVariables()
+    start_websocket_client(shared_vars)

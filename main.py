@@ -1,272 +1,244 @@
 import cv2
-import numpy as np
-import mediapipe as mp
-import threading
 import time
-import configparser
 import logging
-import signal
-import argparse
-import tkinter as tk
-import collections
+from tkinter import Tk, Label, StringVar, Frame
+from PIL import Image, ImageTk
 
-from emotion_recognition import analyze_emotion
-from detectors.eye_detector import calculate_ear
-from detectors.mouth_detector import calculate_mar
-from utils.calculations import fps_calculation
+from detectors.facial_landmarks_processor import FacialLandmarksProcessor
+from emotion_recognition import recognize_emotion
 from utils.shared_variables import SharedVariables
 
-# Global exit event for graceful termination.
-exit_event = threading.Event()
+# Configure logging.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-def signal_handler(sig, frame):
-    logging.info("Signal received. Exiting gracefully...")
-    exit_event.set()
+# ---------------------------------------------------------
+# Detect GPU availability based on OpenCV CUDA capabilities.
+# (Note: This works only if your OpenCV build supports CUDA.)
+has_gpu = False
+try:
+    if hasattr(cv2, 'cuda') and cv2.cuda.getCudaEnabledDeviceCount() > 0:
+        has_gpu = True
+        logger.info("GPU detected – utilizing GPU acceleration if available.")
+    else:
+        logger.info("No GPU detected – running on CPU.")
+except Exception as e:
+    logger.info("No GPU detected - error when checking GPU: %s", e)
 
-# Register termination signals.
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
+# Set parameters based on GPU availability.
+if has_gpu:
+    # If GPU is available, attempt to update more frequently.
+    VIDEO_UPDATE_DELAY = 10        # Delay in ms (targeting a higher update rate)
+    SKIP_PROCESSING_FRAMES = 1       # Process every frame (or reduce skipping)
+else:
+    # If working on CPU only, skip heavy processing on more frames
+    # to try to maintain higher frame rates (aiming closer to 30 FPS).
+    VIDEO_UPDATE_DELAY = 15        # Delay in ms; lower delay may try to increase FPS
+    SKIP_PROCESSING_FRAMES = 4     # Skip heavy processing on most frames
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="Real-Time Facial Tracker for Avatar Animation")
-    parser.add_argument('--config', type=str, default='config.ini', help='Path to configuration file')
-    return parser.parse_args()
+# Constants for detections.
+BLINK_THRESHOLD = 0.25        # When average EAR is below this, a blink is detected.
+MOUTH_OPEN_THRESHOLD = 0.5     # MAR (or lip sync value) above this indicates mouth open.
+EMOTION_INTERVAL = 2.0         # Run emotion recognition at most once every 2 seconds.
+FAILED_FRAME_THRESHOLD = 10    # Number of consecutive failed frame reads before reinitializing the camera.
 
-def start_dashboard(shared_vars, data_lock):
-    """
-    Starts a Tkinter diagnostics dashboard that updates every second with the current FPS 
-    and face detection details.
-    """
-    root = tk.Tk()
-    root.title("Diagnostics Dashboard")
-    label = tk.Label(root, text="Starting...", font=("Helvetica", 14))
-    label.pack(padx=20, pady=20)
+class AnimotionInterface:
+    def __init__(self, video_source: int = 0) -> None:
+        """
+        Initialize the Animotion interface: set up video capture, processing, and build the Tkinter UI.
+        """
+        self.video_source = video_source
+        self.shared_vars = SharedVariables()
+        self.processor = FacialLandmarksProcessor()
 
-    def update():
-        with data_lock:
-            fps = shared_vars.fps if shared_vars.fps is not None else 0.0
-            faces = shared_vars.faces
-        info = f"FPS: {fps:.2f}\nFaces Detected: {len(faces)}\n"
-        for idx, face in enumerate(faces):
-            ear_left = face.get("ear_left", "N/A")
-            ear_right = face.get("ear_right", "N/A")
-            mar = face.get("mar", "N/A")
-            blink = face.get("eye_blinked", False)
-            mouth_open = face.get("mouth_open", False)
-            emotion = face.get("emotion", "N/A")
-            info += f"\nFace {idx+1}:\n"
-            info += f"  EAR Left : {ear_left if isinstance(ear_left, str) else f'{ear_left:.2f}'}\n"
-            info += f"  EAR Right: {ear_right if isinstance(ear_right, str) else f'{ear_right:.2f}'}\n"
-            info += f"  Blink    : {'Yes' if blink else 'No'}\n"
-            info += f"  MAR      : {mar if isinstance(mar, str) else f'{mar:.2f}'}\n"
-            info += f"  Mouth Open: {'Yes' if mouth_open else 'No'}\n"
-            info += f"  Emotion  : {emotion}\n"
-        label.config(text=info)
-        root.after(1000, update)
+        # Initialize VideoCapture.
+        self.cap = cv2.VideoCapture(self.video_source)
+        if not self.cap.isOpened():
+            logger.error("Cannot open video source: %s", self.video_source)
+            raise Exception("Video capture initialization failed.")
 
-    update()
-    root.mainloop()
+        # (Optional) Set a fixed, lower resolution to help performance.
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-def get_mode(emotions_list):
-    """
-    Helper function to calculate the mode (most common emotion) from a list.
-    """
-    if not emotions_list:
-        return "Neutral"
-    data = collections.Counter(emotions_list)
-    return data.most_common(1)[0][0]
+        # Initialize UI.
+        self.root = Tk()
+        self.root.title("Animotion - Facial Tracking Interface")
 
-class FrameProcessor:
-    """
-    Processes video frames to detect facial landmarks using MediaPipe,
-    calculates various metrics (EAR, MAR), detects eye blink and mouth open status,
-    and integrates emotion recognition with temporal smoothing.
-    """
-    def __init__(self, config, shared_vars, data_lock):
-        self.config = config
-        self.shared_vars = shared_vars
-        self.data_lock = data_lock
+        # Bind the "q" key to quit.
+        self.root.bind("<Key>", self.on_key_press)
 
-        # Read thresholds and parameters from config.
-        self.ear_threshold = config.getfloat('Thresholds', 'EAR_THRESHOLD', fallback=0.22)
-        self.mar_threshold = config.getfloat('Thresholds', 'MAR_THRESHOLD', fallback=0.5)
-        # Number of frames to skip between emotion analyses.
-        self.emotion_analysis_interval = config.getint('Advanced', 'EMOTION_ANALYSIS_INTERVAL', fallback=15)
-        self.use_emotion_recognition = config.getboolean('Emotion', 'USE_EMOTION_RECOGNITION', fallback=True)
-        self.run_emotion = config.getboolean('Advanced', 'RUN_EMOTION_ANALYSIS', fallback=True)
-        # Buffer size for temporal smoothing of emotion results.
-        self.emotion_buffer_size = config.getint('Advanced', 'EMOTION_BUFFER_SIZE', fallback=5)
+        # Video display.
+        self.video_label = Label(self.root)
+        self.video_label.pack()
 
-        # Dictionary to store recent emotion results per face index.
-        self.emotion_buffers = {}
+        # Status frame.
+        status_frame = Frame(self.root)
+        status_frame.pack(pady=5)
 
-        # Configure MediaPipe FaceMesh.
-        self.mp_face_mesh = mp.solutions.face_mesh
-        self.face_mesh = self.mp_face_mesh.FaceMesh(
-            static_image_mode=False,
-            max_num_faces=5,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
+        self.status_var = StringVar()
+        self.status_var.set("Running")
+        self.status_label = Label(status_frame, textvariable=self.status_var, font=("Arial", 12))
+        self.status_label.pack()
 
+        self.detection_status_var = StringVar()
+        self.detection_status_var.set("Detections: N/A")
+        self.detection_status_label = Label(status_frame, textvariable=self.detection_status_var, font=("Arial", 12))
+        self.detection_status_label.pack()
+
+        self.fps_var = StringVar()
+        self.fps_var.set("FPS: N/A")
+        self.fps_label = Label(status_frame, textvariable=self.fps_var, font=("Arial", 12))
+        self.fps_label.pack()
+
+        # Variables for managing processing.
+        self.running = False
+        self.failed_frame_count = 0
+        self.last_emotion_time = 0.0
+        self.last_fps_time = time.time()
         self.frame_count = 0
-        self.start_time = time.time()
+        self.skip_counter = 0
 
-    def detect_eye_blink(self, face_landmarks, width, height, threshold):
-        """Detects eye blink via the average eye aspect ratio (EAR) for both eyes."""
-        left_eye_indices = [33, 160, 158, 133, 153, 144]
-        right_eye_indices = [362, 385, 387, 263, 373, 380]
-        left_eye_landmarks = [face_landmarks.landmark[i] for i in left_eye_indices]
-        right_eye_landmarks = [face_landmarks.landmark[i] for i in right_eye_indices]
-        ear_left = calculate_ear(left_eye_landmarks, width, height)
-        ear_right = calculate_ear(right_eye_landmarks, width, height)
-        avg_ear = (ear_left + ear_right) / 2.0
-        return avg_ear < threshold
+    def on_key_press(self, event):
+        """If 'q' is pressed, stop processing and close the window."""
+        if event.char.lower() == 'q':
+            self.stop()
+            self.root.destroy()
 
-    def process(self, cap):
-        """
-        Main loop. Processes each video frame, detects faces and their landmarks,
-        computes metrics, and performs emotion recognition (with temporal smoothing
-        and reduced frequency) before displaying the annotated frame.
-        """
-        while cap.isOpened() and not exit_event.is_set():
-            ret, frame = cap.read()
-            if not ret:
-                logging.warning("Failed to grab frame. Retrying...")
-                continue
+    def start(self) -> None:
+        """Begin the video updating loop immediately."""
+        if self.running:
+            return
+        self.running = True
+        self.last_emotion_time = time.time()
+        self.last_fps_time = time.time()
+        self.frame_count = 0
+        self.skip_counter = 0
+        self.update_video()  # Start updating frames.
+        logger.info("Animotion interface started.")
 
-            frame = cv2.resize(frame, (640, 480))
-            height, width = frame.shape[:2]
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self.face_mesh.process(rgb_frame)
-            face_data = []
+    def stop(self) -> None:
+        """Stop the video updating loop."""
+        self.running = False
+        self.status_var.set("Stopped")
+        logger.info("Animotion interface stopped.")
 
-            if results.multi_face_landmarks:
-                for idx, face_landmarks in enumerate(results.multi_face_landmarks):
-                    # Calculate EAR and MAR from the landmarks.
-                    ear_left = calculate_ear(
-                        [face_landmarks.landmark[i] for i in [33, 160, 158, 133, 153, 144]],
-                        width, height
-                    )
-                    ear_right = calculate_ear(
-                        [face_landmarks.landmark[i] for i in [362, 385, 387, 263, 373, 380]],
-                        width, height
-                    )
-                    mar = calculate_mar(
-                        [face_landmarks.landmark[i] for i in [61, 291, 13, 14]],
-                        width, height
-                    )
-                    eye_blinked = self.detect_eye_blink(face_landmarks, width, height, self.ear_threshold)
-                    mouth_open = mar > self.mar_threshold
-
-                    # Compute bounding box for the face.
-                    landmarks_array = np.array([[lm.x * width, lm.y * height] for lm in face_landmarks.landmark])
-                    x1, y1 = np.min(landmarks_array, axis=0).astype(int)
-                    x2, y2 = np.max(landmarks_array, axis=0).astype(int)
-                    x1, y1 = max(0, x1), max(0, y1)
-                    x2, y2 = min(width, x2), min(height, y2)
-                    face_roi = frame[y1:y2, x1:x2]
-
-                    # Use temporal smoothing: run emotion detection every N frames.
-                    if self.frame_count % self.emotion_analysis_interval == 0:
-                        detected_emotion = analyze_emotion(
-                            face_roi,
-                            use_emotion_recognition=self.use_emotion_recognition
-                        )
-                        # Initialize/update buffer for this face index.
-                        if idx not in self.emotion_buffers:
-                            self.emotion_buffers[idx] = []
-                        self.emotion_buffers[idx].append(detected_emotion)
-                        if len(self.emotion_buffers[idx]) > self.emotion_buffer_size:
-                            self.emotion_buffers[idx].pop(0)
-                    
-                    # Retrieve the smoothed emotion (mode over the buffer) or fallback to Neutral.
-                    current_buffer = self.emotion_buffers.get(idx, [])
-                    emotion_text = get_mode(current_buffer) if current_buffer else "Neutral"
-
-                    face_data.append({
-                        "ear_left": ear_left,
-                        "ear_right": ear_right,
-                        "mar": mar,
-                        "eye_blinked": eye_blinked,
-                        "mouth_open": mouth_open,
-                        "emotion": emotion_text,
-                        "bounding_box": (x1, y1, x2, y2)
-                    })
-
-                    # Annotate the frame with bounding box and emotion label.
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(frame, emotion_text, (x1, max(y1 - 5, 0)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-
-            with self.data_lock:
-                self.shared_vars.faces = face_data
-
-            self.frame_count, fps = fps_calculation(self.frame_count, self.start_time)
-            with self.data_lock:
-                self.shared_vars.fps = fps
-
-            cv2.putText(frame, f"FPS: {fps:.2f}", (500, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            cv2.imshow('Facial Tracker', frame)
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                exit_event.set()
-                break
-
-        cap.release()
-        cv2.destroyAllWindows()
-        logging.info("Program terminated.")
-
-def main():
-    args = parse_arguments()
-    config = configparser.ConfigParser()
-    config.read(args.config)
-
-    log_level = config.get('Logging', 'LOG_LEVEL', fallback='INFO').upper()
-    numeric_level = getattr(logging, log_level, logging.INFO)
-    logging.basicConfig(level=numeric_level, format='%(asctime)s - %(levelname)s - %(message)s')
-    logging.info("Starting Facial Tracker.")
-
-    camera_url = config.get('Camera', 'DROIDCAM_URL', fallback='0')
-    cap = cv2.VideoCapture(camera_url if camera_url != '0' else 0)
-    if not cap.isOpened():
-        logging.error(f"Cannot open camera '{camera_url}'")
-        return
-
-    shared_vars = SharedVariables()
-    shared_vars.faces = []
-    shared_vars.fps = 0.0
-    data_lock = threading.Lock()
-
-    # Start the WebSocket thread if enabled.
-    if config.getboolean('WebSocket', 'ENABLE_WEBSOCKET', fallback=False):
+    def reinitialize_video_capture(self) -> None:
+        """Reinitialize VideoCapture in case of repeated frame capture failures."""
         try:
-            from websocket_client import start_websocket
-            websocket_thread = threading.Thread(target=start_websocket, args=(shared_vars, data_lock), daemon=True)
-            websocket_thread.start()
-        except ImportError as e:
-            logging.error(f"WebSocket module import failed: {e}")
-    else:
-        logging.info("WebSocket integration is disabled via config.")
+            self.cap.release()
+        except Exception as e:
+            logger.error("Error releasing VideoCapture: %s", e)
+        logger.info("Reinitializing video capture on source %s...", self.video_source)
+        self.cap = cv2.VideoCapture(self.video_source)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        if not self.cap.isOpened():
+            logger.error("Reinitialization failed; video source %s cannot be opened.", self.video_source)
+        else:
+            logger.info("Video capture reinitialized successfully.")
 
-    # Start diagnostics dashboard if enabled.
-    if config.getboolean('Dashboard', 'ENABLE_DASHBOARD', fallback=True):
-        dashboard_thread = threading.Thread(target=start_dashboard, args=(shared_vars, data_lock), daemon=True)
-        dashboard_thread.start()
-    else:
-        logging.info("Diagnostics dashboard is disabled via config.")
+    def update_video(self) -> None:
+        """
+        Capture a frame, perform (optional) heavy processing every N frames,
+        update the FPS and detections, and refresh the display.
+        """
+        if not self.running:
+            return
 
-    processor = FrameProcessor(config, shared_vars, data_lock)
-    try:
-        processor.process(cap)
-    except Exception as e:
-        logging.exception(f"Unexpected error during processing: {e}")
-    finally:
-        exit_event.set()
-        cap.release()
-        cv2.destroyAllWindows()
+        ret, frame = self.cap.read()
+        if not ret:
+            self.failed_frame_count += 1
+            logger.warning("Failed to capture frame. Count: %s", self.failed_frame_count)
+            if self.failed_frame_count >= FAILED_FRAME_THRESHOLD:
+                logger.warning("Failed frame threshold reached. Reinitializing capture.")
+                self.reinitialize_video_capture()
+                self.failed_frame_count = 0
+            self.root.after(VIDEO_UPDATE_DELAY, self.update_video)
+            return
+        else:
+            self.failed_frame_count = 0
 
-if __name__ == "__main__":
+        self.frame_count += 1
+        self.skip_counter += 1
+        current_time = time.time()
+
+        # Perform heavy processing (landmark detection, emotion recognition) only on selected frames.
+        if self.skip_counter % SKIP_PROCESSING_FRAMES == 0:
+            metrics = self.processor.process_frame(frame)
+            if metrics:
+                self.shared_vars.ear_left = metrics.get("ear_left")
+                self.shared_vars.ear_right = metrics.get("ear_right")
+                self.shared_vars.mar = metrics.get("mar")
+                self.shared_vars.ebr_left = metrics.get("ebr_left")
+                self.shared_vars.ebr_right = metrics.get("ebr_right")
+                self.shared_vars.lip_sync_value = metrics.get("lip_sync_value")
+                head_pose = metrics.get("head_pose", {})
+                if head_pose.get("rotation_vector") is not None:
+                    rotation = head_pose["rotation_vector"]
+                    if isinstance(rotation, (list, tuple)) and len(rotation) >= 3:
+                        self.shared_vars.yaw = rotation[0]
+                        self.shared_vars.pitch = rotation[1]
+                        self.shared_vars.roll = rotation[2]
+
+            # Run emotion recognition every EMOTION_INTERVAL seconds.
+            if current_time - self.last_emotion_time > EMOTION_INTERVAL:
+                try:
+                    emotion = recognize_emotion(frame)
+                except Exception as e:
+                    logger.error("Emotion recognition failed: %s", e)
+                    emotion = "unknown"
+                self.shared_vars.emotion = emotion
+                self.last_emotion_time = current_time
+
+        # Update detection status text.
+        detection_text = ""
+        if self.shared_vars.ear_left is not None and self.shared_vars.ear_right is not None:
+            avg_ear = (self.shared_vars.ear_left + self.shared_vars.ear_right) / 2.0
+            blink_det = "Yes" if avg_ear < BLINK_THRESHOLD else "No"
+            detection_text += f"Blink: {blink_det}\n"
+        else:
+            detection_text += "Blink: N/A\n"
+
+        if self.shared_vars.mar is not None:
+            mouth_status = "Yes" if self.shared_vars.mar > MOUTH_OPEN_THRESHOLD else "No"
+            detection_text += f"Mouth Open: {mouth_status}\n"
+        else:
+            detection_text += "Mouth Open: N/A\n"
+
+        emotion_disp = self.shared_vars.emotion if self.shared_vars.emotion is not None else "N/A"
+        detection_text += f"Emotion: {emotion_disp}"
+        self.detection_status_var.set(detection_text)
+
+        # Calculate FPS every second.
+        elapsed_time = current_time - self.last_fps_time
+        if elapsed_time >= 1.0:
+            fps = self.frame_count / elapsed_time
+            self.fps_var.set(f"FPS: {fps:.2f}")
+            self.frame_count = 0
+            self.last_fps_time = current_time
+
+        # Convert the frame from BGR to RGB, then display it.
+        try:
+            cv2img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(cv2img)
+            imgtk = ImageTk.PhotoImage(image=img)
+            self.video_label.imgtk = imgtk  # Keep reference.
+            self.video_label.configure(image=imgtk)
+        except Exception as e:
+            logger.error("Error converting frame for display: %s", e)
+
+        # Schedule the next update.
+        self.root.after(VIDEO_UPDATE_DELAY, self.update_video)
+
+    def run(self) -> None:
+        """Start processing and enter the Tkinter mainloop."""
+        self.start()
+        self.root.mainloop()
+
+def main() -> None:
+    interface = AnimotionInterface(video_source=0)
+    interface.run()
+
+if __name__ == '__main__':
     main()
