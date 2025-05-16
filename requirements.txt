@@ -1,4 +1,5 @@
-deepface==0.0.93
+torch
+torchvision
 numpy==2.2.5
 opencv_contrib_python==4.11.0.86
 opencv_python==4.11.0.86
