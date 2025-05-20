@@ -94,6 +94,7 @@ async def get_parameter_list(ws, model_id):
     else:
         print(f"❌ Failed: {response.get('data', {}).get('message', 'Unknown error')}")
         return []
+
 async def set_mouth_open(ws, value):
     message = {
         "apiName": "VTubeStudioPublicAPI",
@@ -111,6 +112,20 @@ async def set_mouth_open(ws, value):
     }
     await ws.send(json.dumps(message))
 
+async def send_parameter_updates(ws, param_dict):
+    message = {
+        "apiName": "VTubeStudioPublicAPI",
+        "apiVersion": "1.0",
+        "requestID": str(uuid.uuid4()),
+        "messageType": "SetParameterValueRequest",
+        "data": {
+            "parameterValues": [
+                {"id": key, "value": float(val)}
+                for key, val in param_dict.items()
+            ]
+        }
+    }
+    await ws.send(json.dumps(message))
 
 async def main():
     async with websockets.connect(URI) as ws:
