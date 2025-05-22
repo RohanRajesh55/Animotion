@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import websockets
 import json
 import os
@@ -21,16 +22,23 @@ async def get_token(ws):
         }
     }
     await ws.send(json.dumps(request))
-    response = json.loads(await ws.recv())
-    print("Token response:", response)
-
-    token = response["data"]["authenticationToken"]
-    if response["data"].get("requiresVerification", False):
-        print("Please approve the plugin in VTube Studio.")
-        await asyncio.sleep(10)
-    with open(TOKEN_FILE, "w") as f:
-        f.write(token)
-    return token
+    try:
+        raw_response = await ws.recv()
+        logging.info(f"Raw token response: {raw_response}")
+        response = json.loads(raw_response)
+        logging.info(f"Parsed token response: {response}")
+        token = response["data"].get("authenticationToken")
+        if not token:
+            logging.error("No authentication token in response")
+            raise Exception("No authentication token provided")
+        if response["data"].get("requiresVerification", False):
+            logging.info("Please approve the plugin in VTube Studio.")
+        with open(TOKEN_FILE, "w") as f:
+            f.write(token)
+        return response
+    except Exception as e:
+        logging.error(f"Error in get_token: {e}")
+        raise
 
 async def authenticate(ws, token):
     auth_request = {
@@ -45,12 +53,20 @@ async def authenticate(ws, token):
         }
     }
     await ws.send(json.dumps(auth_request))
-    response = json.loads(await ws.recv())
-    print("Authentication response:", response)
-
-    if response.get("messageType") != "AuthenticationResponse" or not response["data"]["authenticated"]:
-        raise Exception("Authentication failed! Try deleting vts_token.txt and retrying.")
-    print("Authenticated successfully!")
+    try:
+        raw_response = await ws.recv()
+        logging.info(f"Raw auth response: {raw_response}")
+        response = json.loads(raw_response)
+        logging.info(f"Parsed auth response: {response}")
+        if response.get("messageType") != "AuthenticationResponse" or not response["data"].get("authenticated"):
+            error_msg = response.get("data", {}).get("message", "Unknown error")
+            logging.error(f"Authentication failed: {error_msg}")
+            raise Exception(f"Authentication failed: {error_msg}")
+        logging.info("Authenticated successfully!")
+        return response
+    except Exception as e:
+        logging.error(f"Error in authenticate: {e}")
+        raise
 
 async def get_current_model(ws):
     request = {
@@ -62,13 +78,14 @@ async def get_current_model(ws):
     }
     await ws.send(json.dumps(request))
     response = json.loads(await ws.recv())
-    print("Current model response:", response)
+    logging.info(f"Current model response: {response}")
     if response.get("messageType") == "CurrentModelResponse":
         model_id = response["data"].get("modelID")
         if not model_id:
-            print("⚠️ No model is currently loaded in VTube Studio.")
+            logging.warning("No model is currently loaded in VTube Studio.")
         return model_id
     else:
+        logging.error(f"Failed to get current model: {response.get('data', {}).get('message', 'Unknown error')}")
         raise Exception("Failed to get current model")
 
 async def get_parameter_list(ws, model_id):
@@ -76,23 +93,20 @@ async def get_parameter_list(ws, model_id):
         "apiName": "VTubeStudioPublicAPI",
         "apiVersion": "1.0",
         "requestID": str(uuid.uuid4()),
-        "messageType": "InputParameterListRequest",  # ← Updated message type
+        "messageType": "InputParameterListRequest",
         "data": {
             "modelID": model_id
         }
     }
     await ws.send(json.dumps(request))
     response = json.loads(await ws.recv())
-    print("Parameter list response:", json.dumps(response, indent=2))  # Pretty-print
-
+    logging.info(f"Parameter list response: {json.dumps(response, indent=2)}")
     if response.get("messageType") == "InputParameterListResponse":
         parameters = response["data"].get("parameters", [])
-        print(f"✅ Found {len(parameters)} parameters:")
-        for param in parameters:
-            print(f" - {param.get('name', 'Unnamed')} (ID: {param['id']})")
+        logging.info(f"Found {len(parameters)} parameters: {[p.get('name', 'Unnamed') for p in parameters]}")
         return parameters
     else:
-        print(f"❌ Failed: {response.get('data', {}).get('message', 'Unknown error')}")
+        logging.error(f"Failed to get parameter list: {response.get('data', {}).get('message', 'Unknown error')}")
         return []
 
 async def set_mouth_open(ws, value):
@@ -104,7 +118,7 @@ async def set_mouth_open(ws, value):
         "data": {
             "parameterValues": [
                 {
-                    "id": "MouthOpen",  # or check from get_parameter_list
+                    "id": "MouthOpen",
                     "value": value
                 }
             ]
@@ -129,42 +143,34 @@ async def send_parameter_updates(ws, param_dict):
 
 async def main():
     async with websockets.connect(URI) as ws:
-        print("Connected!")
+        logging.info("Connected!")
         token = None
         if os.path.exists(TOKEN_FILE):
             with open(TOKEN_FILE, "r") as f:
                 token = f.read().strip()
-            print(f"Loaded token from file: {token}")
+            logging.info(f"Loaded token from file: {token}")
         else:
-            token = await get_token(ws)
+            token_response = await get_token(ws)
+            token = token_response["data"].get("authenticationToken")
 
-        await authenticate(ws, token)
-        model_id = "27f71b1596cd47db84292b6085dc3f91"
-
-        if model_id:
-            await get_parameter_list(ws,model_id)
-        else:
-            print("❌ No model loaded. Please load a model in VTube Studio and try again.")
+        auth_response = await authenticate(ws, token)
+        model_id = await get_current_model(ws)
         if model_id:
             await get_parameter_list(ws, model_id)
-            print("📤 Sending mouth open values... Press Ctrl+C to stop.")
+            logging.info("Sending mouth open values... Press Ctrl+C to stop.")
             try:
                 while True:
-                    # TODO: Replace with your actual tracking value (0.0 to 1.0)
                     simulated_mouth_value = 0.6
-
                     await set_mouth_open(ws, simulated_mouth_value)
-                    await asyncio.sleep(1 / 30)  # 30 FPS
+                    await asyncio.sleep(1 / 30)
             except KeyboardInterrupt:
-                print("Stopped by user.")
-
+                logging.info("Stopped by user.")
         else:
-            print("❌ No model loaded. Please load a model in VTube Studio and try again.")
-
-
+            logging.error("No model loaded. Please load a model in VTube Studio and try again.")
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
     try:
         asyncio.run(main())
     except Exception as e:
-        print("An error occurred:", e)
+        logging.error(f"An error occurred: {e}")
